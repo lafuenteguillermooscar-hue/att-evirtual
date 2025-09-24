@@ -1,0 +1,617 @@
+// ==UserScript==
+// @name         Asignador de Elementos CF a EC
+// @namespace    https://github.com/lafuenteguillermooscar-hue
+// @version      1.0
+// @description  Mueve TODOS los ítems de "Sin asignar" a “Evaluación Continua”. Detecta la caja aunque esté vacía. Botón manual + HUD + toasts + POST persistente + auto-guardar + UI mejorada (fiable en iframes y cargas tardías).
+// @author       Marce
+// @match        https://calificaciones.lti.unir.net/*
+// @match        about:blank
+// @run-at       document-start
+// @all-frames   true
+// @grant        none
+// @license      MIT
+// @homepageURL  https://github.com/lafuenteguillermooscar-hue/att-evirtual
+// @supportURL   https://github.com/lafuenteguillermooscar-hue/att-evirtual/issues
+// @downloadURL  https://raw.githubusercontent.com/lafuenteguillermooscar-hue/att-evirtual/main/Asignador_de_Elementos_CF_a_EC.user.js
+// @updateURL    https://raw.githubusercontent.com/lafuenteguillermooscar-hue/att-evirtual/main/Asignador_de_Elementos_CF_a_EC.user.js
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /* ==================== Ajustes (con persistencia) ==================== */
+  const LS_KEY = 'uaec_settings_v8';
+  const DEFAULTS = {
+    postDelayMs: 150,
+    autosave: true,
+    highlightColor: '#2563eb',
+    PREFERRED_CAT_IDS: ['133111'], // puedes añadir más: ['133111','133081']
+    ui: { x: null, y: null, compact: false }
+  };
+  const loadSettings = () => {
+    try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(LS_KEY)||'{}')); }
+    catch { return {...DEFAULTS}; }
+  };
+  const saveSettings = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(SETTINGS)); } catch {} };
+  const SETTINGS = loadSettings();
+
+  /* ==================== Utils ==================== */
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+  const norm = s=>String(s||'').replace(/\s+/g,' ').trim();
+  const pageT = ()=>norm(document.body?.innerText||'');
+  const looksLike = ()=>/Sin asignar|Sin asignación/i.test(pageT()) && /Evaluaci[oó]n\s+Continua/i.test(pageT());
+  const inCalificacionesHost = () => /calificaciones\.lti\.unir\.net$/i.test(location.hostname);
+  let RUNNING = false;
+
+  /* ==================== Estilos ==================== */
+  (function injectCSS(){
+    const css = `
+      :root { --uaec-accent: ${SETTINGS.highlightColor}; }
+      @keyframes uaecPulse { 0%{box-shadow:0 0 0 0 rgba(37,99,235,.35)} 70%{box-shadow:0 0 0 12px rgba(37,99,235,0)} 100%{box-shadow:0 0 0 0 rgba(37,99,235,0)} }
+      .uaec-pulse { outline:3px solid var(--uaec-accent); outline-offset:2px; border-radius:10px; animation: uaecPulse 1.4s infinite; }
+
+      .uaec-card {
+        position: fixed; z-index: 2147483647; top: 18px; right: 18px;
+        color:#e5e7eb; background: rgba(17,24,39,.92); backdrop-filter: blur(8px);
+        border-radius: 16px; border:1px solid rgba(255,255,255,.08);
+        box-shadow: 0 18px 40px rgba(0,0,0,.35);
+        font: 13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; min-width: 280px;
+        user-select: none;
+      }
+      .uaec-card::before {
+        content:""; position:absolute; inset:0; border-radius:16px; padding:1px;
+        background: linear-gradient(135deg, rgba(255,255,255,.12), rgba(255,255,255,0) 60%),
+                    linear-gradient(135deg, var(--uaec-accent), transparent 40%);
+        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor; mask-composite: exclude; pointer-events:none;
+      }
+      .uaec-head {
+        display:flex; align-items:center; gap:8px; padding:10px 12px 8px 12px; cursor:grab;
+      }
+      .uaec-head:active { cursor:grabbing; }
+      .uaec-dot { width:10px; height:10px; border-radius:50%; background: var(--uaec-accent); box-shadow:0 0 12px var(--uaec-accent); }
+      .uaec-title { font-weight:700; letter-spacing:.2px; }
+      .uaec-spacer { flex:1; }
+      .uaec-iconbtn {
+        display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px;
+        border-radius:10px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.03);
+        cursor:pointer; transition: transform .08s ease, filter .2s ease, background .2s;
+      }
+      .uaec-iconbtn:hover { transform: translateY(-1px); filter: brightness(1.06); background:rgba(255,255,255,.06); }
+      .uaec-iconbtn:active { transform: translateY(0); filter: brightness(.95); }
+
+      .uaec-body { padding: 0 12px 12px 12px; display:flex; flex-direction:column; gap:10px; }
+      .uaec-btn {
+        display:flex; align-items:center; gap:10px; cursor:pointer;
+        border:0; border-radius:12px; padding:12px 14px; font-weight:800; letter-spacing:.2px;
+        background: linear-gradient(135deg, var(--uaec-accent), #7c3aed);
+        color:#fff; box-shadow: 0 10px 26px rgba(37,99,235,.35);
+        transition: transform .08s ease, filter .2s ease;
+      }
+      .uaec-btn:hover { transform: translateY(-1px); filter: brightness(1.05); }
+      .uaec-btn:active { transform: translateY(0); filter: brightness(.95); }
+
+      .uaec-sub { font-size:12px; opacity:.85; margin-top:-4px; }
+      .uaec-grid { display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center; }
+      .uaec-badge {
+        padding:4px 8px; border-radius:999px; font-size:11px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08);
+      }
+
+      .uaec-panel {
+        display:none; padding:10px; border-radius:12px; background:rgba(255,255,255,.03);
+        border:1px solid rgba(255,255,255,.08); gap:10px; flex-direction:column;
+      }
+      .uaec-panel.show{ display:flex; }
+      .uaec-field { display:flex; flex-direction:column; gap:6px; }
+      .uaec-field label { font-size:12px; opacity:.9; }
+      .uaec-input, .uaec-range, .uaec-text {
+        width:100%; border-radius:10px; padding:8px 10px; color:#e5e7eb; background:rgba(255,255,255,.05);
+        border:1px solid rgba(255,255,255,.08); outline:none;
+      }
+      .uaec-range { accent-color: var(--uaec-accent); }
+      .uaec-actions { display:flex; gap:8px; }
+      .uaec-secondary {
+        border-radius:10px; padding:8px 10px; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.08); cursor:pointer;
+      }
+
+      /* HUD */
+      .uaec-hud {
+        position: fixed; z-index: 2147483647; top: 78px; right: 18px;
+        background: rgba(17,24,39,.92); color:#e5e7eb; backdrop-filter: blur(8px);
+        padding: 12px 14px; border-radius: 14px; border:1px solid rgba(255,255,255,.08);
+        box-shadow: 0 18px 40px rgba(0,0,0,.35);
+        font: 13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;
+        display: none; min-width: 280px;
+      }
+      .uaec-hud.show { display: block; }
+      .uaec-hud h4 { margin:0 0 8px 0; font-size:13px; letter-spacing:.3px; opacity:.9 }
+      .uaec-bar { width:100%; height:10px; border-radius:8px; background: rgba(255,255,255,.10); overflow:hidden; position:relative; }
+      .uaec-bar::after {
+        content:""; position:absolute; inset:0; background: repeating-linear-gradient(60deg, rgba(255,255,255,.08) 0 10px, rgba(255,255,255,0) 10px 20px);
+        animation: uaecStripe 1.2s linear infinite; opacity:.7;
+      }
+      @keyframes uaecStripe { to { background-position: 40px 0; } }
+      .uaec-bar > span {
+        display:block; height:100%; width:0%;
+        background: linear-gradient(90deg, var(--uaec-accent), #7c3aed); border-radius:8px; transition: width .2s ease
+      }
+      .uaec-small { margin-top:8px; opacity:.85; font-size:12px; display:flex; justify-content:space-between; }
+
+      /* Toasts */
+      .uaec-toast {
+        position: fixed; z-index: 2147483647; left: 50%; bottom: 28px; transform: translateX(-50%);
+        background: rgba(30,41,59,.97); color:#fff; padding: 10px 14px; border-radius: 12px;
+        border: 1px solid rgba(255,255,255,.10); box-shadow: 0 14px 30px rgba(0,0,0,.35);
+        font: 13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; opacity: 0; transition: opacity .2s, transform .2s;
+        display:flex; gap:10px; align-items:center;
+      }
+      .uaec-toast.show { opacity: 1; transform: translateX(-50%) translateY(-3px); }
+      .uaec-toast .uaec-ico { width:16px; height:16px; }
+      .uaec-toast.error { background: rgba(127,29,29,.95); }
+
+      /* Modo compacto */
+      .uaec-card.compact .uaec-sub, .uaec-card.compact .uaec-grid, .uaec-card.compact .uaec-panel { display:none !important; }
+      .uaec-card.compact .uaec-body { padding: 0 12px 12px 12px; }
+      .uaec-card.compact { min-width: 240px; }
+    `;
+    const st=document.createElement('style'); st.textContent=css;
+    (document.head || document.documentElement).appendChild(st);
+  })();
+
+  /* ==================== HUD / Toast ==================== */
+  let hud, hudBar, hudText, hudCount, toastEl, uiCard, settingsPanel;
+
+  function ensureHUD(){
+    if (hud) return;
+    hud = document.createElement('div');
+    hud.className = 'uaec-hud';
+    hud.innerHTML = `
+      <h4>Asignando a <b>Evaluación Continua</b></h4>
+      <div class="uaec-bar"><span></span></div>
+      <div class="uaec-small"><span id="uaec-hud-text">Preparando…</span><span id="uaec-hud-count"></span></div>
+    `;
+    hudBar = hud.querySelector('.uaec-bar > span');
+    hudText = hud.querySelector('#uaec-hud-text');
+    hudCount = hud.querySelector('#uaec-hud-count');
+    document.body.appendChild(hud);
+  }
+  function showHUD(){ ensureHUD(); hud.classList.add('show'); }
+  function hideHUD(){ if(hud) hud.classList.remove('show'); }
+  function setHUD(pct, text, count){
+    ensureHUD();
+    hudBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    if (text) hudText.textContent = text;
+    if (count!=null) hudCount.textContent = count;
+  }
+  function toast(msg, type='info'){
+    if(!toastEl){
+      toastEl=document.createElement('div'); toastEl.className='uaec-toast'; toastEl.setAttribute('role','status');
+      toastEl.innerHTML = `<svg class="uaec-ico" viewBox="0 0 24 24" fill="none"><path d="M12 2l9 21H3L12 2z" stroke="white" stroke-opacity=".8"/><circle cx="12" cy="17" r="1.2" fill="white"/><path d="M12 8v6" stroke="white"/></svg><span class="uaec-txt"></span>`;
+      document.body.appendChild(toastEl);
+    }
+    const txt = toastEl.querySelector('.uaec-txt');
+    txt.textContent = msg;
+    toastEl.classList.toggle('error', type==='error');
+    toastEl.classList.add('show'); clearTimeout(toastEl._t);
+    toastEl._t = setTimeout(()=>toastEl.classList.remove('show'), 3400);
+  }
+
+  /* ==================== DOM helpers (sin exigir <li>) ==================== */
+  function pickList(root){
+    if(!root) return null;
+    let l = root.querySelector('ul,ol');
+    if (l) return l;
+    const alt = [...root.querySelectorAll('div,section')].find(d => d.querySelector('li[id$="|iditem"]'));
+    return alt || null;
+  }
+
+  function findECHeadings() {
+    const nodes = document.querySelectorAll('h1,h2,h3,h4,legend,strong,label,span,th,p,div');
+    return [...nodes].filter(n => /^evaluaci[oó]n\s+continua$/i.test(norm(n.textContent)));
+  }
+
+  function nearestContainerWithListOrSelf(h){
+    if(!h) return null;
+    let sib=h.nextElementSibling;
+    for(let i=0;i<10 && sib;i++,sib=sib.nextElementSibling){
+      const l = sib.querySelector?.('ul,ol,[id*="|idcategory"]');
+      if (l) return l.tagName ? l : sib;
+    }
+    let p=h;
+    for(let u=0;u<6 && p;u++,p=p.parentElement){
+      const l = p.querySelector?.('ul,ol,[id*="|idcategory"]');
+      if (l) return l.tagName ? l : p;
+    }
+    return null;
+  }
+
+  // === EC target & token (funciona con UL vacía) ===
+  function getECTargetAndToken() {
+    // 1) Por preferencia explícita
+    for (const id of SETTINGS.PREFERRED_CAT_IDS||[]) {
+      try {
+        const sel1 = `ul#${CSS.escape(id + '|idcategory')}`;
+        const sel2 = `ul#${CSS.escape(id + '|idcategory|sumPerc')}`;
+        const ul = document.querySelector(sel1) || document.querySelector(sel2);
+        if (ul) return { target: ul, catToken: `${id}|idcategory` };
+      } catch {}
+    }
+
+    // 2) Todas las UL candidatas
+    const allULs = [...document.querySelectorAll('ul[id*="|idcategory"]')];
+    const sortedULs = allULs.sort((a,b)=>{
+      const aP = /\|idcategory\|sumPerc$/i.test(a.id) ? 2 : (/\|idcategory$/i.test(a.id) ? 1 : 0);
+      const bP = /\|idcategory\|sumPerc$/i.test(b.id) ? 2 : (/\|idcategory$/i.test(b.id) ? 1 : 0);
+      return bP - aP;
+    });
+
+    const heads = findECHeadings();
+    const headContainers = new Set(heads.map(h => (h.closest('section,div,fieldset,article,td,th') || h.parentElement || h)));
+    const byHeading = sortedULs.find(ul => {
+      const ctx = ul.closest('section,div,fieldset,article,td,th') || ul.parentElement || ul;
+      const txt = norm(ctx.innerText || '');
+      const isEC = /Evaluaci[oó]n\s+Continua/i.test(txt);
+      const notFinal = !/Examen\s*Final/i.test(txt);
+      const sharesContainer = [...headContainers].some(c => c && (c === ctx || c.contains(ul) || ctx.contains(c)));
+      return (isEC || sharesContainer) && notFinal;
+    });
+    if (byHeading) {
+      const m = (byHeading.id||'').match(/(\d+)\|idcategory/i);
+      if (m) return { target: byHeading, catToken: `${m[1]}|idcategory` };
+    }
+
+    for (const h of heads) {
+      const cont = nearestContainerWithListOrSelf(h);
+      if (!cont) continue;
+      const candidate = cont.querySelector?.('ul[id*="|idcategory"]') || cont.closest?.('ul[id*="|idcategory"]') || cont;
+      if (candidate && candidate.id && /\|idcategory/i.test(candidate.id)) {
+        const m = candidate.id.match(/(\d+)\|idcategory/i);
+        if (m) return { target: candidate, catToken: `${m[1]}|idcategory` };
+      }
+    }
+
+    if (sortedULs.length === 1) {
+      const m = (sortedULs[0].id||'').match(/(\d+)\|idcategory/i);
+      if (m) return { target: sortedULs[0], catToken: `${m[1]}|idcategory` };
+    }
+
+    const carriers = [...document.querySelectorAll('[id*="|idcategory"]')];
+    const goodCarrier = carriers.find(el => {
+      const ctx = el.closest('section,div,fieldset,article,td,th') || el.parentElement || el;
+      const txt = norm(ctx.innerText || '');
+      return /Evaluaci[oó]n\s+Continua/i.test(txt) && !/Examen\s*Final/i.test(txt);
+    });
+    if (goodCarrier) {
+      const drop = goodCarrier.querySelector('ul,ol') || goodCarrier;
+      const m = (goodCarrier.id||'').match(/(\d+)\|idcategory/i);
+      if (m) return { target: drop, catToken: `${m[1]}|idcategory` };
+    }
+
+    return { target: null, catToken: null };
+  }
+
+  // === IDs de "Sin asignar" ===
+  function getUnassignedIditems() {
+    const nodes = document.querySelectorAll('h1,h2,h3,h4,legend,strong,label,span,th,p,div');
+    let srcHeading = null;
+    for (const n of nodes) {
+      const t = norm(n.textContent).toLowerCase();
+      if (/^sin\s+asignar$|^sin\s+asignación$/.test(t)) { srcHeading = n; break; }
+    }
+    let srcList = null;
+    if (srcHeading) {
+      let sib = srcHeading.nextElementSibling;
+      for (let i=0;i<10 && sib;i++,sib=sib.nextElementSibling){
+        const l = sib.querySelector?.('ul,ol') || sib.querySelector?.('[id*="|iditem"]');
+        if (l) { srcList = sib.querySelector?.('ul,ol') || sib; break; }
+      }
+      if (!srcList) {
+        let p = srcHeading;
+        for (let u=0; u<6 && p; u++, p=p.parentElement) {
+          const l = p.querySelector?.('ul,ol') || p.querySelector?.('[id*="|iditem"]');
+          if (l) { srcList = p.querySelector?.('ul,ol') || p; break; }
+        }
+      }
+    }
+    const items = srcList ? [...srcList.querySelectorAll('li[id$="|iditem"]')].map(li=>li.id) : [];
+    return [...new Set(items)];
+  }
+
+  /* === Endpoint Wicket === */
+  function endpointCandidates(){
+    const here = new URL(location.href);
+    const list = [];
+    const meta = document.querySelector('meta[name="wicket-ajax-base-url"]');
+    if (meta?.content) {
+      try {
+        const u = new URL(meta.content, here.origin);
+        // fuerza el panel de tabs común
+        const fixed = u.href.replace(/(\?.*)?$/, '?1-1.0-tabs-content-panel');
+        list.push(fixed);
+      } catch {}
+    }
+    // variantes típicas
+    list.push(here.origin + here.pathname.replace(/\/+$/,'') + '?1-1.0-tabs-content-panel');
+    list.push(here.href.replace(/(\?.*)?$/, '?1-1.0-tabs-content-panel'));
+    list.push(here.href);
+    return [...new Set(list)];
+  }
+
+  async function postAssign(ep, iditem, idcategory){
+    const body = JSON.stringify({ order: [iditem], changedList: idcategory });
+    try{
+      const res = await fetch(ep, {
+        method: 'POST',
+        headers: {
+          'accept': 'application/json, text/javascript, */*; q=0.01',
+          'content-type': 'application/json; charset=UTF-8',
+          'x-requested-with': 'XMLHttpRequest'
+        },
+        credentials: 'include',
+        body
+      });
+      return res.ok;
+    }catch{ return false; }
+  }
+
+  async function clickSaveIfAny(){
+    if(!SETTINGS.autosave) return;
+    const btns=[...document.querySelectorAll('button, input[type="submit"], .btn, a.button, [role="button"]')];
+    const save=btns.find(b=>/(guardar cambios|guardar|save)/i.test(norm(b.textContent)));
+    if (save) save.click();
+  }
+
+  /* ==================== Lógica principal ==================== */
+  async function assignAll(){
+    if (RUNNING) return;
+    RUNNING = true;
+
+    showHUD(); setHUD(0, 'Buscando secciones…');
+
+    const {target: ecTarget, catToken} = getECTargetAndToken();
+    if (!ecTarget || !catToken) {
+      hideHUD(); RUNNING = false;
+      toast('No pude localizar la caja de “Evaluación Continua”.', 'error');
+      return;
+    }
+
+    ecTarget.classList.add('uaec-pulse');
+
+    const items = getUnassignedIditems();
+    if (!items.length) {
+      ecTarget.classList.remove('uaec-pulse');
+      hideHUD(); RUNNING = false;
+      toast('No hay ítems en “Sin asignar”.');
+      return;
+    }
+
+    setHUD(6, `Detectados ${items.length} ítems.`, `${0}/${items.length}`);
+
+    const eps = endpointCandidates();
+    let okEP = null;
+    for (const ep of eps) {
+      const ok = await postAssign(ep, items[0], catToken);
+      if (ok) { okEP = ep; break; }
+    }
+    if (!okEP) {
+      ecTarget.classList.remove('uaec-pulse');
+      hideHUD(); RUNNING = false;
+      toast('No pude contactar el endpoint (?1-1.0-tabs-content-panel).', 'error');
+      return;
+    }
+
+    for (let i=0;i<items.length;i++){
+      const pct = Math.round(((i)/items.length)*100*0.9)+10;
+      setHUD(pct, `Asignando ${i+1}/${items.length}…`, `${i+1}/${items.length}`);
+      const ok = await postAssign(okEP, items[i], catToken);
+      if (!ok) console.warn('[UAEC] Falló', items[i], '→', catToken, 'en', okEP);
+      await sleep(SETTINGS.postDelayMs);
+    }
+
+    ecTarget.classList.remove('uaec-pulse');
+    setHUD(100, 'Finalizando…', `${items.length}/${items.length}`);
+
+    await clickSaveIfAny();
+
+    hideHUD();
+    toast('¡Listo! Asignados a “Evaluación Continua”.');
+    RUNNING = false;
+  }
+
+  /* ==================== UI Mejorada ==================== */
+  function svg(name){
+    if (name==='gear') return `<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm8.5 3 1.2 2.1-1.5 2.6-2.4-.3a7.8 7.8 0 0 1-1.4 1.4l.3 2.4-2.6 1.5-2.1-1.2-2.1 1.2-2.6-1.5.3-2.4a7.8 7.8 0 0 1-1.4-1.4l-2.4.3-1.5-2.6L3.5 11.5 2.3 9.4l1.5-2.6 2.4.3c.4-.5.9-1 1.4-1.4l-.3-2.4L10.3.8l2.1 1.2 2.1-1.2 2.6 1.5-.3 2.4c.5.4 1 .9 1.4 1.4l2.4-.3 1.5 2.6-1.2 2.1Z" stroke="currentColor" stroke-opacity=".9"/></svg>`;
+    if (name==='min') return `<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M5 12h14" stroke="currentColor" stroke-width="2"/></svg>`;
+    if (name==='expand') return `<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M4 14v6h6M20 10V4h-6" stroke="currentColor" stroke-width="2"/></svg>`;
+    if (name==='run') return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M8 5l10 7-10 7V5z" fill="currentColor"/></svg>`;
+    return '';
+  }
+
+  function ensureUI(){
+    if (uiCard) return;
+
+    uiCard = document.createElement('div');
+    uiCard.className = 'uaec-card';
+    if (SETTINGS.ui.compact) uiCard.classList.add('compact');
+
+    uiCard.innerHTML = `
+      <div class="uaec-head" title="Arrastra para mover">
+        <div class="uaec-dot"></div>
+        <div class="uaec-title">CF → EC</div>
+        <div class="uaec-spacer"></div>
+        <button class="uaec-iconbtn" id="uaec-compact" title="Modo compacto">${svg('min')}</button>
+        <button class="uaec-iconbtn" id="uaec-gear" title="Ajustes">${svg('gear')}</button>
+      </div>
+      <div class="uaec-body">
+        <button class="uaec-btn" id="uaec-run" title="Mover todo de Sin asignar a Evaluación Continua">
+          ${svg('run')} <span>Asignar a Elementos de Evaluación Continua</span>
+        </button>
+        <div class="uaec-sub">Detecta “Evaluación Continua” incluso si la lista está vacía. Mantén esta tarjeta visible mientras trabajas.</div>
+
+        <div class="uaec-grid">
+          <span class="uaec-badge">Autoguardado: <b id="uaec-badge-autosave">${SETTINGS.autosave?'ON':'OFF'}</b></span>
+          <span class="uaec-badge">Delay: <b id="uaec-badge-delay">${SETTINGS.postDelayMs}ms</b></span>
+        </div>
+
+        <div class="uaec-panel" id="uaec-panel">
+          <div class="uaec-field">
+            <label><input type="checkbox" id="uaec-autosave"> Guardar automáticamente al finalizar</label>
+          </div>
+          <div class="uaec-field">
+            <label>Retardo entre POST <small>(50–500 ms)</small></label>
+            <input type="range" min="50" max="500" step="10" class="uaec-range" id="uaec-delay">
+          </div>
+          <div class="uaec-field">
+            <label>Color de énfasis</label>
+            <input type="color" class="uaec-input" id="uaec-color">
+          </div>
+          <div class="uaec-field">
+            <label>IDs preferidos de categoría (coma separada)</label>
+            <input type="text" class="uaec-text" id="uaec-prefids" placeholder="133111,133081">
+          </div>
+          <div class="uaec-actions">
+            <button class="uaec-btn" id="uaec-savecfg" style="padding:8px 12px;">Guardar ajustes</button>
+            <button class="uaec-secondary" id="uaec-resetcfg">Restablecer</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(uiCard);
+
+    // Posición persistente
+    if (SETTINGS.ui.x!=null && SETTINGS.ui.y!=null) {
+      uiCard.style.left = SETTINGS.ui.x+'px';
+      uiCard.style.top = SETTINGS.ui.y+'px';
+      uiCard.style.right = 'auto';
+    }
+
+    // Drag
+    const head = uiCard.querySelector('.uaec-head');
+    let drag = null;
+    head.addEventListener('mousedown', (e)=>{
+      if (e.button!==0) return;
+      const r = uiCard.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      e.preventDefault();
+    });
+    function onMove(e){
+      if (!drag) return;
+      uiCard.style.left = (e.clientX - drag.dx)+'px';
+      uiCard.style.top = (e.clientY - drag.dy)+'px';
+      uiCard.style.right = 'auto';
+    }
+    function onUp(){
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      if (!drag) return;
+      const r = uiCard.getBoundingClientRect();
+      SETTINGS.ui.x = r.left; SETTINGS.ui.y = r.top; saveSettings();
+      drag = null;
+    }
+
+    // Acciones
+    uiCard.querySelector('#uaec-run')?.addEventListener('click', assignAll);
+    const gear = uiCard.querySelector('#uaec-gear');
+    settingsPanel = uiCard.querySelector('#uaec-panel');
+    const compactBtn = uiCard.querySelector('#uaec-compact');
+
+    gear.addEventListener('click', ()=>{ settingsPanel.classList.toggle('show'); });
+    compactBtn.addEventListener('click', ()=>{
+      uiCard.classList.toggle('compact');
+      SETTINGS.ui.compact = uiCard.classList.contains('compact');
+      saveSettings();
+    });
+
+    // Cargar valores ajustes
+    const autosaveChk = uiCard.querySelector('#uaec-autosave');
+    const delayRange = uiCard.querySelector('#uaec-delay');
+    const colorInp = uiCard.querySelector('#uaec-color');
+    const prefIdsInp = uiCard.querySelector('#uaec-prefids');
+    const badgeAuto = uiCard.querySelector('#uaec-badge-autosave');
+    const badgeDelay = uiCard.querySelector('#uaec-badge-delay');
+
+    autosaveChk.checked = !!SETTINGS.autosave;
+    delayRange.value = SETTINGS.postDelayMs;
+    colorInp.value = SETTINGS.highlightColor;
+    prefIdsInp.value = (SETTINGS.PREFERRED_CAT_IDS||[]).join(',');
+
+    // Guardar ajustes
+    uiCard.querySelector('#uaec-savecfg').addEventListener('click', ()=>{
+      SETTINGS.autosave = !!autosaveChk.checked;
+      SETTINGS.postDelayMs = Math.max(50, Math.min(500, parseInt(delayRange.value||150,10)));
+      SETTINGS.highlightColor = String(colorInp.value||'#2563eb');
+      document.documentElement.style.setProperty('--uaec-accent', SETTINGS.highlightColor);
+
+      const ids = prefIdsInp.value.split(',').map(s=>norm(s)).filter(Boolean);
+      SETTINGS.PREFERRED_CAT_IDS = ids;
+      saveSettings();
+
+      badgeAuto.textContent = SETTINGS.autosave?'ON':'OFF';
+      badgeDelay.textContent = SETTINGS.postDelayMs+'ms';
+
+      toast('Ajustes guardados');
+    });
+
+    // Reset
+    uiCard.querySelector('#uaec-resetcfg').addEventListener('click', ()=>{
+      Object.assign(SETTINGS, JSON.parse(JSON.stringify(DEFAULTS)));
+      saveSettings();
+      // Aplicar UI:
+      autosaveChk.checked = SETTINGS.autosave;
+      delayRange.value = SETTINGS.postDelayMs;
+      colorInp.value = SETTINGS.highlightColor;
+      prefIdsInp.value = SETTINGS.PREFERRED_CAT_IDS.join(',');
+      document.documentElement.style.setProperty('--uaec-accent', SETTINGS.highlightColor);
+      uiCard.classList.toggle('compact', !!SETTINGS.ui.compact);
+      toast('Ajustes restablecidos');
+    });
+  }
+
+  /* ==================== Montaje y fallback de visibilidad ==================== */
+  function init() {
+    const SHOW_FALLBACK_AFTER_MS = 4000;
+
+    const showIfGood = ()=>{
+      // Si no estamos en el host de calificaciones, no mostramos aún (evita fugas en about:blank de otros sitios)
+      if (!inCalificacionesHost()) return;
+
+      const { target } = getECTargetAndToken();
+      if (target || looksLike()) { ensureUI(); return; }
+
+      // Aún sin UL, pero hay señales: textos típicos, URL de panel, etc.
+      const bodyText = document.body?.innerText || '';
+      const weakHints = /Calificaciones|Evaluaci[oó]n|Categor[ií]a|Elementos de calificación/i.test(bodyText)
+                      || /\?1-1\.0-tabs-content-panel/.test(location.search);
+      const anyUL = document.querySelector('ul[id*="|idcategory"]');
+      if (anyUL || weakHints) ensureUI();
+    };
+
+    // Intento inmediato
+    showIfGood();
+
+    // Fallback: tras N ms, si seguimos en host correcto y sin tarjeta, muéstrala igual
+    setTimeout(() => {
+      if (!uiCard && inCalificacionesHost()) ensureUI();
+    }, SHOW_FALLBACK_AFTER_MS);
+
+    // Observa cambios (carga perezosa/Ajax/Wicket/iframes)
+    const mo = new MutationObserver(() => showIfGood());
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  const ready=(p,cb,t=20000)=>{
+    const s=Date.now();
+    const i=setInterval(()=>{
+      try{
+        if(p()){
+          clearInterval(i); cb();
+        }else if(Date.now()-s>t){
+          clearInterval(i); cb(); // aún así intentamos montar
+        }
+      }catch{ clearInterval(i); cb(); }
+    }, 200);
+  };
+  ready(()=>document && document.body, init);
+})();
