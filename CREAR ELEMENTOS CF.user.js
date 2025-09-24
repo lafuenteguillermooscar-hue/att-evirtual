@@ -12,7 +12,7 @@
 // @homepageURL  https://github.com/lafuenteguillermooscar-hue/att-evirtual
 // @supportURL   https://github.com/lafuenteguillermooscar-hue/att-evirtual/issues
 // @downloadURL  https://raw.githubusercontent.com/lafuenteguillermooscar-hue/att-evirtual/main/CREAR ELEMENTOS CF.user.js
-// @updateURL    https://raw.githubusercontent.com/YOUR_GITHUB_USER/YOUR_REPO_NAME/YOUR_BRANCH/CREAR ELEMENTOS CF.user.js
+// @updateURL    https://raw.githubusercontent.com/lafuenteguillermooscar-hue/att-evirtual/main/CREAR ELEMENTOS CF.user.js
 // ==/UserScript==
 (function () {
   'use strict';
