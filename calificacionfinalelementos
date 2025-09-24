@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Asignador de Elementos CF a EC
-// @namespace    unir-auto-ec-button-hud-emptyok
-// @version      1.0.0
+// @namespace    https://github.com/lafuenteguillermooscar-hue
+// @version      1.0.1
 // @description  Mueve TODOS los ítems de "Sin asignar" a “Evaluación Continua”. Detecta la caja aunque esté vacía. Botón manual + HUD + toasts + POST persistente + auto-guardar + UI mejorada. La UI ahora se muestra fiable incluso en iframes y cargas tardías.
 // @match        https://calificaciones.lti.unir.net/*
 // @match        about:blank
